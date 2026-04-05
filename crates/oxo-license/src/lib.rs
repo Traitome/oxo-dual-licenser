@@ -408,8 +408,12 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
+    use std::sync::Mutex;
 
     const TEST_SCHEMA: &str = "test-app-license-v1";
+
+    /// Serializes tests that read/write `TEST_APP_LICENSE` to prevent races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_test_keypair() -> (SigningKey, String) {
         let key = SigningKey::generate(&mut OsRng);
@@ -611,6 +615,7 @@ mod tests {
 
     #[test]
     fn test_find_license_path_from_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         unsafe {
@@ -626,6 +631,7 @@ mod tests {
 
     #[test]
     fn test_find_license_path_cli_arg_takes_precedence() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let cli_path = PathBuf::from("/nonexistent/cli-license.json");
         let env_path = PathBuf::from("/nonexistent/env-license.json");
         unsafe {
