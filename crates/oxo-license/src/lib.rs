@@ -404,7 +404,8 @@ fn default_license_candidates(config: &LicenseConfig) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    #[allow(unused_imports)]
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
