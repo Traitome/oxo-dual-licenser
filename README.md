@@ -11,6 +11,14 @@
 [oxo-call](https://github.com/Traitome/oxo-call) project into a reusable
 library and CLI tool.
 
+## Features
+
+- **Ed25519 signatures** — Cryptographically secure license verification
+- **Offline verification** — No network calls at runtime
+- **Flexible license types** — academic, commercial, enterprise, or custom
+- **Configurable discovery** — CLI args, env vars, or platform config dirs
+- **oxo-call compatible** — Can issue and verify oxo-call licenses
+
 ## Workspace Crates
 
 | Crate | Description |
@@ -68,6 +76,54 @@ oxo-license-issuer verify \
   --schema my-app-license-v1 \
   license.json
 ```
+
+### Helper script
+
+```bash
+# Issue license with the helper script
+./issue-license.sh "Acme University" "research@acme.edu" academic license.json
+```
+
+## oxo-call Compatibility
+
+This library can fully replace the license module in oxo-call:
+
+```rust
+use oxo_license::LicenseConfig;
+
+pub static OXO_CALL_CONFIG: LicenseConfig = LicenseConfig {
+    schema_version: "oxo-call-license-v1",
+    public_key_base64: "SOTbyPWS8fSF+XS9dqEg9cFyag0wPO/YMA5LhI4PXw4=",
+    license_env_var: "OXO_CALL_LICENSE",
+    app_qualifier: "io",
+    app_org: "traitome",
+    app_name: "oxo-call",
+    license_filename: "license.oxo.json",
+};
+```
+
+### Issue licenses for oxo-call
+
+```bash
+# Using the script
+./issue-license.sh "Customer Name" "customer@example.com" academic license.oxo.json
+
+# Or using CLI directly
+oxo-license-issuer issue \
+  --schema oxo-call-license-v1 \
+  --org "Customer Name" \
+  --type commercial \
+  --output license.oxo.json
+```
+
+## Documentation
+
+Full documentation is available at [GitHub Pages](https://traitome.github.io/oxo-dual-licenser/).
+
+- [Installation](docs/guide/docs/tutorials/installation.md)
+- [Quickstart](docs/guide/docs/tutorials/quickstart.md)
+- [Issue a License](docs/guide/docs/how-to/issue-license.md)
+- [API Reference](docs/guide/docs/reference/api.md)
 
 ## License
 
