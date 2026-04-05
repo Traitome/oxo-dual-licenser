@@ -1,0 +1,48 @@
+site_name: oxo-dual-licenser
+site_url: https://traitome.github.io/oxo-dual-licenser/
+site_description: Generic dual-license runtime verification library for Traitome projects
+repo_url: https://github.com/Traitome/oxo-dual-licenser
+repo_name: Traitome/oxo-dual-licenser
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Installation: tutorials/installation.md
+      - Quickstart: tutorials/quickstart.md
+  - How-To Guides:
+      - Issue a License: how-to/issue-license.md
+  - Reference:
+      - API Reference: reference/api.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true

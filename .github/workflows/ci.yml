@@ -1,0 +1,504 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish (e.g. v1.2.3). Leave empty for a plain CI run.'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Effective release tag: the git tag triggering this run (tag push) or the
+  # manually supplied tag (workflow_dispatch with inputs.tag set).
+  RELEASE_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') && inputs.tag || github.ref_name }}
+
+jobs:
+  # ─── Sync Cargo.toml / Cargo.lock / CITATION.cff version with git tag ───────
+  sync-version:
+    name: Sync version from tag
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: extract
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Tag version: $VERSION"
+
+      - name: Check and patch Cargo.toml + CITATION.cff
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.extract.outputs.version }}"
+          CURRENT_LIB=$(grep -m1 '^version = ' crates/oxo-license/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "oxo-license version: $CURRENT_LIB  |  Tag version: $VERSION"
+          if [ "$VERSION" = "$CURRENT_LIB" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Updating crates/oxo-license/Cargo.toml: $CURRENT_LIB → $VERSION"
+          CURRENT_ESC=$(printf '%s' "$CURRENT_LIB" | sed 's/[.]/\\./g')
+          sed -i "0,/^version = \"$CURRENT_ESC\"/{s/^version = \"$CURRENT_ESC\"/version = \"$VERSION\"/}" crates/oxo-license/Cargo.toml
+          CURRENT_ISSUER=$(grep -m1 '^version = ' crates/oxo-license-issuer/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          CURRENT_ISSUER_ESC=$(printf '%s' "$CURRENT_ISSUER" | sed 's/[.]/\\./g')
+          sed -i "0,/^version = \"$CURRENT_ISSUER_ESC\"/{s/^version = \"$CURRENT_ISSUER_ESC\"/version = \"$VERSION\"/}" crates/oxo-license-issuer/Cargo.toml
+          TODAY=$(date -u +%Y-%m-%d)
+          sed -i "s/^version: .*/version: $VERSION/" CITATION.cff
+          sed -i "s/^date-released: .*/date-released: \"$TODAY\"/" CITATION.cff
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust (stable)
+        if: steps.patch.outputs.changed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update Cargo.lock
+        if: steps.patch.outputs.changed == 'true'
+        run: cargo update --workspace
+
+      - name: Commit and push version bump
+        if: steps.patch.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add crates/oxo-license/Cargo.toml crates/oxo-license-issuer/Cargo.toml Cargo.lock CITATION.cff
+          git commit -m "chore: bump version to ${{ steps.extract.outputs.version }} [skip ci]"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
+          NEW_SHA=$(git rev-parse HEAD)
+          echo "New commit: $NEW_SHA"
+          if git cat-file -t "$GITHUB_REF_NAME" 2>/dev/null | grep -q '^tag$'; then
+            TAG_MSG=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")
+            git tag -d "$GITHUB_REF_NAME"
+            git tag -a "$GITHUB_REF_NAME" "$NEW_SHA" -m "$TAG_MSG"
+          else
+            git tag -f "$GITHUB_REF_NAME" "$NEW_SHA"
+          fi
+          git push origin "$GITHUB_REF_NAME" --force
+          echo "Tag $GITHUB_REF_NAME moved to $NEW_SHA"
+
+  # ─── Quality gate: fmt + clippy + tests ──────────────────────────────────────
+  test:
+    name: Test (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    needs: [sync-version]
+    if: always() && (needs.sync-version.result == 'success' || needs.sync-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
+
+      - name: Code coverage
+        run: |
+          cargo install cargo-tarpaulin --quiet
+          cargo tarpaulin --verbose --workspace --timeout 120 --out xml
+        continue-on-error: true
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: cobertura.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+  # ─── Cross-compile Linux binaries ────────────────────────────────────────────
+  build-linux:
+    name: Build Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always() && needs.test.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release (cross)
+        run: cross build --release --target ${{ matrix.target }} -p oxo-license-issuer
+
+      - name: Package binary
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BIN_NAME="oxo-license-issuer"
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          tar -C "${TARGET_DIR}" -czvf \
+            "dist/${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" \
+            "${BIN_NAME}"
+
+      - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        uses: actions/upload-artifact@v7
+        with:
+          name: oxo-license-issuer-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  # ─── Build macOS binaries ────────────────────────────────────────────────────
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    needs: [test]
+    if: always() && needs.test.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-14
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p oxo-license-issuer
+
+      - name: Package binary
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BIN_NAME="oxo-license-issuer"
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          tar -C "${TARGET_DIR}" -czvf \
+            "dist/${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" \
+            "${BIN_NAME}"
+
+      - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        uses: actions/upload-artifact@v7
+        with:
+          name: oxo-license-issuer-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  # ─── Build Windows binaries ──────────────────────────────────────────────────
+  build-windows:
+    name: Build Windows (${{ matrix.target }})
+    runs-on: windows-latest
+    needs: [test]
+    if: always() && needs.test.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p oxo-license-issuer
+
+      - name: Package binary
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        shell: pwsh
+        run: |
+          $BIN_NAME = "oxo-license-issuer"
+          $TARGET_DIR = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "${TARGET_DIR}/${BIN_NAME}.exe" `
+            -DestinationPath "dist/${BIN_NAME}-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        uses: actions/upload-artifact@v7
+        with:
+          name: oxo-license-issuer-${{ matrix.target }}
+          path: dist/*.zip
+
+  # ─── GitHub Release ───────────────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    permissions:
+      contents: write
+    needs: [sync-version, build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')) &&
+      (needs.sync-version.result == 'success' || needs.sync-version.result == 'skipped') &&
+      needs.build-linux.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      needs.build-windows.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag != '') && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Install git-cliff
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLIFF_VERSION="2.12.0"
+          ARCH="x86_64-unknown-linux-gnu"
+          URL="https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-${ARCH}.tar.gz"
+          curl -sSfL "$URL" -o /tmp/git-cliff.tar.gz
+          tar -xzf /tmp/git-cliff.tar.gz -C /tmp
+          install -m 755 "/tmp/git-cliff-${CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
+          git-cliff --version
+
+      - name: Generate changelog for this release
+        shell: bash
+        run: git-cliff --config cliff.toml --current --strip header --output RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          mkdir -p artifacts/checksums
+          cd artifacts
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                sha256sum "$f" | awk -v name="$(basename "$f")" '{print $1 "  " name}'
+              done \
+            | sort -k2 > checksums/SHA256SUMS.txt
+          echo "=== SHA256SUMS ==="
+          cat checksums/SHA256SUMS.txt
+
+      - name: Generate full CHANGELOG.md
+        shell: bash
+        run: git-cliff --config cliff.toml --output CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/checksums/SHA256SUMS.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update CHANGELOG.md in repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          cp CHANGELOG.md /tmp/CHANGELOG.md
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+          cp /tmp/CHANGELOG.md CHANGELOG.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet CHANGELOG.md; then
+            git add CHANGELOG.md
+            git commit -m "docs: update CHANGELOG.md for ${RELEASE_TAG} [skip ci]"
+            git push origin "$DEFAULT_BRANCH"
+          else
+            echo "CHANGELOG.md is already up-to-date"
+          fi
+
+  # ─── Publish to crates.io ────────────────────────────────────────────────────
+  publish-crate:
+    name: Publish to crates.io
+    needs: [sync-version, test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Confirm versions match tag
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          LIB_VER=$(grep -m1 '^version = ' crates/oxo-license/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          ISSUER_VER=$(grep -m1 '^version = ' crates/oxo-license-issuer/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Tag: $TAG  |  oxo-license: $LIB_VER  |  oxo-license-issuer: $ISSUER_VER"
+          if [ "$TAG" != "$LIB_VER" ] || [ "$TAG" != "$ISSUER_VER" ]; then
+            echo "::error::Version mismatch: tag=$TAG lib=$LIB_VER issuer=$ISSUER_VER"
+            exit 1
+          fi
+
+      - name: Update lock file
+        run: cargo update --workspace
+
+      - name: Publish oxo-license
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oxo-license --locked
+
+      - name: Wait for crates.io index propagation
+        run: sleep 30
+
+      - name: Publish oxo-license-issuer
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oxo-license-issuer --locked
+
+  # ─── Deploy GitHub Pages (MkDocs documentation) ──────────────────────────────
+  deploy-pages:
+    name: Deploy GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: >-
+      always() &&
+      needs.test.result == 'success' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material
+
+      - name: Build documentation
+        run: cd docs/guide && mkdocs build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/guide/site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

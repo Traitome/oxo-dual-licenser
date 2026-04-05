@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use oxo-dual-licenser in your research, please cite it as below."
+title: "oxo-dual-licenser"
+version: 0.1.0
+date-released: "2025-01-01"
+url: "https://github.com/Traitome/oxo-dual-licenser"
+repository-code: "https://github.com/Traitome/oxo-dual-licenser"
+license: MIT
+authors:
+  - name: "Traitome"
+    website: "https://github.com/Traitome"

@@ -1,0 +1,28 @@
+[package]
+name = "oxo-license"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Generic dual-license runtime verification library for Traitome projects"
+keywords = ["license", "verification", "ed25519", "dual-license", "traitome"]
+categories = ["authentication", "cryptography"]
+license-file = "../../LICENSE"
+publish = true
+readme = "../../README.md"
+
+[dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = { workspace = true }
